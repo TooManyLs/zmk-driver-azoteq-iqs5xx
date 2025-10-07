@@ -222,7 +222,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         uint16_t initial_dist, consec_dist;
         int16_t zoom_delta;
 
-        int16_t zoom_div = 32;
+        int16_t zoom_div = 16;
         int16_t zoom_threshold = zoom_div / 2;
 
         ret = iqs5xx_read_reg16(dev, IQS5XX_ZOOM_INITIAL_DIST, &initial_dist);
