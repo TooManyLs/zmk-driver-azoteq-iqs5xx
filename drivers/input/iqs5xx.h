@@ -105,6 +105,10 @@
 #define IQS5XX_SCROLL BIT(1)
 #define IQS5XX_ZOOM BIT(2)
 
+// Zoom distance registers
+#define IQS5XX_ZOOM_INITIAL_DIST 0x06CB
+#define IQS5XX_ZOOM_CONSEC_DIST 0x06CD
+
 // Axes configuration.
 #define IQS5XX_XY_CONFIG_0 0x0669
 #define IQS5XX_FLIP_X BIT(0)
@@ -126,6 +130,9 @@ struct iqs5xx_config {
     bool scroll;
     bool natural_scroll_x;
     bool natural_scroll_y;
+
+    // Zoom configuration.
+    bool zoom;
 
     // Axes configuration.
     bool switch_xy;
@@ -150,4 +157,6 @@ struct iqs5xx_data {
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;
+    // Zoom accumulator
+    int16_t zoom_acc;
 };

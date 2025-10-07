@@ -16,6 +16,10 @@
 
 #include "iqs5xx.h"
 
+#ifndef INPUT_REL_ZOOM
+#define INPUT_REL_ZOOM 0x1A
+#endif
+
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
 static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *val) {
@@ -126,6 +130,12 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     }
 
+    bool zoom = (gesture_events_1 & IQS5XX_ZOOM) != 0;
+    if (!zoom) {
+        // Clear zoom accumulator if not zooming
+        data->zoom_acc = 0;
+    }
+
     uint16_t button_code;
     bool button_pressed = false;
     if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
@@ -207,6 +217,34 @@ static void iqs5xx_work_handler(struct k_work *work) {
             }
 
             goto end_comm;
+        }
+    } else if (zoom) {
+        uint16_t initial_dist, consec_dist;
+        int16_t zoom_delta;
+
+        int16_t zoom_div = 32;
+        int16_t zoom_threshold = zoom_div / 2;
+
+        ret - iqs5xx_read_reg16(dev, IQS5XX_ZOOM_INITIAL_DIST, &initial_dist);
+        if (ret < 0) {
+            LOG_ERR("Failed to read zoom initial distance");
+            goto end_comm;
+        }
+
+        ret = iqs5xx_read_reg16(dev, IQS5XX_ZOOM_CONSEC_DIST, &consec_dist);
+        if (ret < 0) {
+            LOG_ERR("Failed to read zoom consecutive distance");
+            goto end_comm;
+        }
+
+        // Compute distance change
+        zoom_delta = (int16_t)(consec_dist - initial_dist);
+        data->zoom_acc += zoom_delta;
+
+        if (abs(data->zoom_acc) >= zoom_threshold) {
+            int16_t steps = data->zoom_acc / zoom_div;
+            input_report_rel(dev, INPUT_REL_ZOOM, steps, true, K_FOREVER);
+            data->zoom_acc %= zoom_div;
         }
     } else if (tp_movement) {
         ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
@@ -290,6 +328,8 @@ static int iqs5xx_setup_device(const struct device *dev) {
     uint8_t two_finger_gestures = 0;
     two_finger_gestures |= config->two_finger_tap ? IQS5XX_TWO_FINGER_TAP : 0;
     two_finger_gestures |= config->scroll ? IQS5XX_SCROLL : 0;
+    two_finger_gestures |= config->zoom ? IQS5XX_ZOOM : 0;
+
     // Configure multi finger gestures.
     ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF, two_finger_gestures);
     if (ret < 0) {
@@ -413,6 +453,7 @@ static int iqs5xx_init(const struct device *dev) {
         .scroll = DT_INST_PROP(n, scroll),                                                         \
         .natural_scroll_x = DT_INST_PROP(n, natural_scroll_x),                                     \
         .natural_scroll_y = DT_INST_PROP(n, natural_scroll_y),                                     \
+        .zoom = DT_INST_PROP(n, zoom),
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \
         .flip_x = DT_INST_PROP(n, flip_x),                                                         \
