@@ -16,8 +16,11 @@
 
 #include "iqs5xx.h"
 
-#ifndef INPUT_REL_ZOOM
-#define INPUT_REL_ZOOM 0x1A
+#ifndef INPUT_KEY_ZOOMIN
+#define INPUT_KEY_ZOOMIN 0x229
+#endif
+#ifndef INPUT_KEY_ZOOMOUT
+#define INPUT_KEY_ZOOMOUT 0x22a
 #endif
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
@@ -243,7 +246,12 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
         if (abs(data->zoom_acc) >= zoom_threshold) {
             int16_t steps = data->zoom_acc / zoom_div;
-            input_report_rel(dev, INPUT_REL_ZOOM, steps, true, K_FOREVER);
+            uint16_t zoom_key = (steps > 0) ? INPUT_KEY_ZOOMIN : INPUT_KEY_ZOOMOUT;
+            int abs_steps = abs(steps);
+            for (int i = 0; i < abs_steps; i++) {
+                input_report_key(dev, zoom_key, 1, false, K_FOREVER);
+                input_report_key(dev, zoom_key, 0, (i == abs_steps - 1), K_FOREVER);
+            }
             data->zoom_acc %= zoom_div;
         }
     } else if (tp_movement) {
