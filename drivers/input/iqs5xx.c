@@ -225,7 +225,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         int16_t zoom_div = 32;
         int16_t zoom_threshold = zoom_div / 2;
 
-        ret - iqs5xx_read_reg16(dev, IQS5XX_ZOOM_INITIAL_DIST, &initial_dist);
+        ret = iqs5xx_read_reg16(dev, IQS5XX_ZOOM_INITIAL_DIST, &initial_dist);
         if (ret < 0) {
             LOG_ERR("Failed to read zoom initial distance");
             goto end_comm;
@@ -453,7 +453,7 @@ static int iqs5xx_init(const struct device *dev) {
         .scroll = DT_INST_PROP(n, scroll),                                                         \
         .natural_scroll_x = DT_INST_PROP(n, natural_scroll_x),                                     \
         .natural_scroll_y = DT_INST_PROP(n, natural_scroll_y),                                     \
-        .zoom = DT_INST_PROP(n, zoom),
+        .zoom = DT_INST_PROP(n, zoom),                                                             \
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \
         .flip_x = DT_INST_PROP(n, flip_x),                                                         \
