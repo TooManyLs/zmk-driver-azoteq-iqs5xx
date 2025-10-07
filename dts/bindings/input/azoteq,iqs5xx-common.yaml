@@ -36,6 +36,10 @@ properties:
     type: boolean
     description: "Whether content should track finger movement when scrolling on the y axis."
 
+  zoom:
+    type: boolean
+    description: "Register and report zoom gesture."
+
   switch-xy:
     type: boolean
     description: "Flip x and y axes"
