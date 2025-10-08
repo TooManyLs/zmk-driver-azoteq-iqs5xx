@@ -239,7 +239,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
         if (abs(data->zoom_acc) >= zoom_threshold) {
             input_report_key(dev, INPUT_KEY_LEFTCTRL, 1, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_WHEEL, data->zoom_acc / zoom_div, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_WHEEL, data->zoom_acc / zoom_div, true, K_FOREVER);
             input_report_key(dev, INPUT_KEY_LEFTCTRL, 0, true, K_FOREVER);
 
             data->zoom_acc %= zoom_div;
