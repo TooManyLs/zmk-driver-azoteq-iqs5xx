@@ -219,7 +219,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
         int16_t zoom_delta;
 
         int16_t zoom_div = 16;
-        int16_t zoom_threshold = zoom_div / 2;
 
         ret = iqs5xx_read_reg16(dev, IQS5XX_ZOOM_INITIAL_DIST, &initial_dist);
         if (ret < 0) {
@@ -237,13 +236,14 @@ static void iqs5xx_work_handler(struct k_work *work) {
         zoom_delta = (int16_t)(consec_dist - initial_dist);
         data->zoom_acc += zoom_delta;
 
-        if (abs(data->zoom_acc) >= zoom_threshold) {
+        if (abs(data->zoom_acc) >= zoom_div) {
             input_report_key(dev, INPUT_KEY_LEFTCTRL, 1, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_WHEEL, data->zoom_acc / zoom_div, true, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_WHEEL, data->zoom_acc / zoom_div, false, K_FOREVER);
             input_report_key(dev, INPUT_KEY_LEFTCTRL, 0, true, K_FOREVER);
 
             data->zoom_acc %= zoom_div;
         }
+        goto end_comm;
     } else if (tp_movement) {
         ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
         if (ret < 0) {
