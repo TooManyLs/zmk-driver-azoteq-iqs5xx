@@ -8,6 +8,21 @@
 #define IQS5XX_TOUCH_STRENGTH 0x001A // 2 bytes.
 #define IQS5XX_TOUCH_AREA 0x001C
 
+// Contiguous block of registers read on every data-ready (RDY) assertion,
+// starting at IQS5XX_GESTURE_EVENTS_0 (0x000D). Reading it in a single
+// transaction keeps the number of bus accesses - and with it the chance of
+// landing outside of a communication window - to a minimum.
+// Layout:
+//   [0]     gesture events 0
+//   [1]     gesture events 1
+//   [2]     system info 0
+//   [3]     system info 1
+//   [4]     number of fingers
+//   [5..6]  relative X
+//   [7..8]  relative Y
+#define IQS5XX_DATA_BLOCK_START 0x000D
+#define IQS5XX_DATA_BLOCK_LEN 9
+
 #define IQS5XX_BOTTOM_BETA 0x0637
 #define IQS5XX_STATIONARY_THRESH 0x0672
 
@@ -150,4 +165,13 @@ struct iqs5xx_data {
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;
+
+    // True while the data-ready interrupt is expected to be enabled.
+    bool rdy_armed;
+    // Consecutive failed transactions since the last successful one. Used to
+    // stop servicing the data-ready interrupt when the trackpad is absent or
+    // the bus has wedged, so that it cannot saturate the CPU.
+    uint8_t consecutive_failures;
+    // Slow retry that re-initializes the trackpad after it stopped responding.
+    struct k_work_delayable recovery_work;
 };
