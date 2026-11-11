@@ -157,21 +157,20 @@ struct iqs5xx_data {
     struct gpio_callback rdy_cb;
     struct k_work work;
     struct k_work_delayable button_release_work;
-    // TODO: Pack flags into a bitfield to save space.
-    bool initialized;
-    // Flag to indicate if the button was pressed in a previous cycle.
-    uint8_t buttons_pressed;
-    bool active_hold;
+    
+    // Use volatile for flags shared between ISR and Thread to prevent compiler caching
+    volatile bool initialized;
+    volatile bool rdy_armed;
+    
+    uint8_t buttons_pressed;     // Bitmask for press state
+    int pending_release_btn;     // Tracks single pending button release
+    
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;
 
-    // True while the data-ready interrupt is expected to be enabled.
-    bool rdy_armed;
-    // Consecutive failed transactions since the last successful one. Used to
-    // stop servicing the data-ready interrupt when the trackpad is absent or
-    // the bus has wedged, so that it cannot saturate the CPU.
+    volatile bool active_hold;   // Also cross-context potentially
+    
     uint8_t consecutive_failures;
-    // Slow retry that re-initializes the trackpad after it stopped responding.
     struct k_work_delayable recovery_work;
 };

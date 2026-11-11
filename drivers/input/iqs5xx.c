@@ -273,16 +273,20 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, button_release_work);
 
-    // TODO: This loop should only deactivate one button.
-    // Log a warning when that is not the case.
-    for (int i = 0; i < 3; i++) {
-        LOG_INF("Releasing synthetic button");
-        if (data->buttons_pressed & BIT(i)) {
-            input_report_key(data->dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
-            // Turn off the bit.
-            // NOTE: This is a potential race.
-            data->buttons_pressed &= ~BIT(i);
+    int btn_idx = data->pending_release_btn;
+    if (btn_idx >= 0) {
+        // Atomically clear the bit and report release. Using K_NO_WAIT prevents
+        // workqueue thread starvation if the input subsystem is stalled.
+        uint8_t old_val = data->buttons_pressed;
+        data->buttons_pressed &= ~(1 << btn_idx);
+        
+        // Check if the bit was actually set to avoid reporting up/down on same event
+        if (old_val & (1 << btn_idx)) {
+            if (input_report_key(data->dev, INPUT_BTN_0 + btn_idx, 0, true, K_NO_WAIT) < 0) {
+                LOG_WRN("Dropped synthetic button release");
+            }
         }
+        data->pending_release_btn = -1; // Reset tracker
     }
 }
 
@@ -389,21 +393,31 @@ static void iqs5xx_work_handler(struct k_work *work) {
     // sync to ensure that the input subsystem processes things in order.
     if (hold_became_active) {
         LOG_INF("Hold became active");
-        input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_FOREVER);
         data->active_hold = true;
+        if (input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_NO_WAIT) < 0) {
+            LOG_WRN("Dropped hold press event");
+        }
     } else if (hold_released) {
         LOG_INF("Hold became inactive");
-        input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
         data->active_hold = false;
+        if (input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_NO_WAIT) < 0) {
+            LOG_WRN("Dropped hold release event");
+        }
     } else if (button_pressed) {
         // Cancel any pending release.
         k_work_cancel_delayable(&data->button_release_work);
 
-        // Press the button immediately.
-        input_report_key(dev, button_code, 1, true, K_FOREVER);
-        data->buttons_pressed |= BIT(button_code - INPUT_BTN_0);
+        int btn_idx = button_code - INPUT_BTN_0;
+        
+        // Press the button immediately. Use K_NO_WAIT to prevent workqueue thread
+        // starvation if the input queue is full or consumer stalls.
+        data->buttons_pressed |= (1 << btn_idx);
+        if (input_report_key(dev, button_code, 1, true, K_NO_WAIT) < 0) {
+            LOG_WRN("Dropped button press event");
+        }
 
-        // Schedule release after 100ms.
+        // Schedule release after 100ms. Track only this button to avoid race conditions.
+        data->pending_release_btn = btn_idx;
         k_work_schedule(&data->button_release_work, K_MSEC(100));
     } else if (scroll) {
         // TODO: Expose this divisor.
@@ -418,8 +432,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
             }
             data->scroll_x_acc += rel_x;
             if (abs(data->scroll_x_acc) >= scroll_div) {
-                input_report_rel(dev, INPUT_REL_HWHEEL, data->scroll_x_acc / scroll_div, true,
-                                K_FOREVER);
+                if (input_report_rel(dev, INPUT_REL_HWHEEL, data->scroll_x_acc / scroll_div, true, K_NO_WAIT) < 0) {
+                    LOG_WRN("Dropped horizontal scroll event");
+                }
                 data->scroll_x_acc %= scroll_div;
             }
             goto end_comm;
@@ -430,8 +445,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
             }
             data->scroll_y_acc += rel_y;
             if (abs(data->scroll_y_acc) >= scroll_div) {
-                input_report_rel(dev, INPUT_REL_WHEEL, data->scroll_y_acc / scroll_div, true,
-                                 K_FOREVER);
+                if (input_report_rel(dev, INPUT_REL_WHEEL, data->scroll_y_acc / scroll_div, true, K_NO_WAIT) < 0) {
+                    LOG_WRN("Dropped vertical scroll event");
+                }
                 data->scroll_y_acc %= scroll_div;
             }
 
@@ -439,8 +455,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
         }
     } else if (tp_movement) {
         if (rel_x != 0 || rel_y != 0) {
-            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_NO_WAIT);
+            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_NO_WAIT);
         }
     }
 
@@ -457,6 +473,7 @@ static void iqs5xx_rdy_handler(const struct device *port, struct gpio_callback *
                                gpio_port_pins_t pins) {
     struct iqs5xx_data *data = CONTAINER_OF(cb, struct iqs5xx_data, rdy_cb);
 
+    // Check initialized and armed flags. Single byte reads are atomic on ARM Cortex-M
     if (!data->initialized || !data->rdy_armed) {
         return;
     }
@@ -478,6 +495,16 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
     k_work_init_delayable(&data->recovery_work, iqs5xx_recovery_work_handler);
+
+    // Initialize fields to known states
+    data->initialized = false;
+    data->rdy_armed = false;
+    data->buttons_pressed = 0;
+    data->pending_release_btn = -1;
+    data->scroll_x_acc = 0;
+    data->scroll_y_acc = 0;
+    data->consecutive_failures = 0;
+    data->active_hold = false;
 
     // Configure reset GPIO if available.
     if (config->reset_gpio.port) {
