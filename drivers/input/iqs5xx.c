@@ -19,37 +19,15 @@
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
 /*
- * The IQS5xx only accepts I2C traffic while a communication window is open,
- * which it signals by asserting RDY. Addressing it outside of a window fails
- * (the first attempt is NACKed, later ones are clock-stretched until the device
- * is available) and, more importantly, it *provokes the device to assert RDY*.
- * Both behaviours are documented in the vendor application note AZD067 and are
- * handled the same way by the upstream Linux driver:
- *
- *   - every access is retried a few times before it counts as a failure;
- *   - accesses made outside of a window (the configuration writes) run with
- *     the data-ready interrupt masked;
- *   - a failed read is never followed by an END_COMM_WINDOW write.
- *
- * That last point is the difference between a dropped report and a dead
- * keyboard. Writing END_COMM_WINDOW outside of a window asserts RDY again, so
- * doing it on the error path closes an endless loop of
- *
- *     RDY -> interrupt -> work -> failed read -> END_COMM -> RDY -> ...
- *
- * which keeps the CPU in the interrupt and work handlers, starves every other
- * thread - including the logger, which is why the logs just stop - and needs a
- * reset to break out of.
+ * The IQS5xx only accepts I2C traffic during a communication window (RDY
+ * asserted). Accessing it outside the window provokes another RDY assertion,
+ * so END_COMM_WINDOW must never be sent on the error path — doing so would
+ * create an endless interrupt storm.
  */
 #define IQS5XX_I2C_RETRIES 5
 #define IQS5XX_I2C_RETRY_DELAY_US 250
 
-/*
- * A trackpad that is absent, or that has wedged its bus, costs a handful of
- * failed transactions per RDY edge. Stop servicing the interrupt after this
- * many consecutive failures and fall back to a slow retry instead, so that a
- * floating or shorted RDY line can never saturate the CPU.
- */
+/* Stop servicing RDY after consecutive failures to prevent CPU saturation. */
 #define IQS5XX_MAX_CONSECUTIVE_FAILURES 8
 #define IQS5XX_RECOVERY_PERIOD K_SECONDS(2)
 
@@ -60,11 +38,6 @@ static int iqs5xx_rdy_interrupt_set(const struct device *dev, bool enable) {
                                            enable ? GPIO_INT_EDGE_RISING : GPIO_INT_DISABLE);
 }
 
-/*
- * The device clock-stretches and NACKs the first access made outside of a
- * communication window, so a single failed transfer does not mean the trackpad
- * is gone. Retry briefly before giving up on the transaction.
- */
 static int iqs5xx_write_buf(const struct device *dev, const uint8_t *buf, size_t len) {
     const struct iqs5xx_config *config = dev->config;
     int ret = -EIO;
@@ -120,7 +93,6 @@ static int iqs5xx_setup_device(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     int ret;
 
-    // Enable event mode and trackpad events.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1,
                             IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT);
     if (ret < 0) {
@@ -141,11 +113,6 @@ static int iqs5xx_setup_device(const struct device *dev) {
     }
 
     // TODO: Expose these through dts bindings.
-    // Set filter settings with:
-    // - IIR filter enabled
-    // - MAV filter enabled
-    // - IIR select disabled (dynamic IIR)
-    // - ALP count filter enabled
     ret = iqs5xx_write_reg8(dev, IQS5XX_FILTER_SETTINGS,
                             IQS5XX_IIR_FILTER | IQS5XX_MAV_FILTER | IQS5XX_ALP_COUNT_FILTER);
     if (ret < 0) {
@@ -156,14 +123,12 @@ static int iqs5xx_setup_device(const struct device *dev) {
     uint8_t single_finger_gestures = 0;
     single_finger_gestures |= config->one_finger_tap ? IQS5XX_SINGLE_TAP : 0;
     single_finger_gestures |= config->press_and_hold ? IQS5XX_PRESS_AND_HOLD : 0;
-    // Configure single finger gestures.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SINGLE_FINGER_GESTURES_CONF, single_finger_gestures);
     if (ret < 0) {
         LOG_ERR("Failed to configure single finger gestures: %d", ret);
         return ret;
     }
 
-    // Configure the hold time for the press and hold gesture.
     ret = iqs5xx_write_reg16(dev, IQS5XX_HOLD_TIME, config->press_and_hold_time);
     if (ret < 0) {
         LOG_ERR("Failed to configure the hold time: %d", ret);
@@ -173,14 +138,12 @@ static int iqs5xx_setup_device(const struct device *dev) {
     uint8_t two_finger_gestures = 0;
     two_finger_gestures |= config->two_finger_tap ? IQS5XX_TWO_FINGER_TAP : 0;
     two_finger_gestures |= config->scroll ? IQS5XX_SCROLL : 0;
-    // Configure multi finger gestures.
     ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF, two_finger_gestures);
     if (ret < 0) {
         LOG_ERR("Failed to configure multi finger gestures: %d", ret);
         return ret;
     }
 
-    // Configure axes.
     uint8_t xy_config = 0;
     xy_config |= config->flip_x ? IQS5XX_FLIP_X : 0;
     xy_config |= config->flip_y ? IQS5XX_FLIP_Y : 0;
@@ -191,14 +154,12 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    // Configure system settings.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_0, IQS5XX_SETUP_COMPLETE | IQS5XX_WDT);
     if (ret < 0) {
         LOG_ERR("Failed to configure system: %d", ret);
         return ret;
     }
 
-    // End communication window.
     ret = iqs5xx_end_comm_window(dev);
     if (ret < 0) {
         LOG_ERR("Failed to end comm window during initialization: %d", ret);
@@ -208,12 +169,6 @@ static int iqs5xx_setup_device(const struct device *dev) {
     return 0;
 }
 
-/*
- * Run the full configuration sequence with the data-ready interrupt masked.
- * The configuration writes happen outside of a communication window, which
- * makes the device assert RDY; without the mask those assertions would be
- * serviced as if they were real reports.
- */
 static int iqs5xx_reconfigure(struct iqs5xx_data *data) {
     const struct device *dev = data->dev;
     int ret;
@@ -238,7 +193,6 @@ static int iqs5xx_reconfigure(struct iqs5xx_data *data) {
     return 0;
 }
 
-/* Mask the data-ready interrupt and arrange for a slow retry instead. */
 static void iqs5xx_suspend_data_ready(struct iqs5xx_data *data) {
     data->rdy_armed = false;
     iqs5xx_rdy_interrupt_set(data->dev, false);
@@ -253,8 +207,6 @@ static void iqs5xx_note_success(struct iqs5xx_data *data) {
 }
 
 static void iqs5xx_note_failure(struct iqs5xx_data *data, const char *what, int err) {
-    // Only the first failure of a burst is logged, so that a misbehaving bus
-    // cannot flood the log while it is already short on CPU time.
     if (data->consecutive_failures == 0) {
         LOG_ERR("Failed to %s: %d", what, err);
     }
@@ -275,18 +227,15 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
 
     int btn_idx = data->pending_release_btn;
     if (btn_idx >= 0) {
-        // Atomically clear the bit and report release. Using K_NO_WAIT prevents
-        // workqueue thread starvation if the input subsystem is stalled.
         uint8_t old_val = data->buttons_pressed;
         data->buttons_pressed &= ~(1 << btn_idx);
-        
-        // Check if the bit was actually set to avoid reporting up/down on same event
+
         if (old_val & (1 << btn_idx)) {
             if (input_report_key(data->dev, INPUT_BTN_0 + btn_idx, 0, true, K_NO_WAIT) < 0) {
                 LOG_WRN("Dropped synthetic button release");
             }
         }
-        data->pending_release_btn = -1; // Reset tracker
+        data->pending_release_btn = -1;
     }
 }
 
@@ -294,8 +243,6 @@ static void iqs5xx_recovery_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, recovery_work);
 
-    // Start every attempt from a clean slate so that the strike counter really
-    // counts consecutive failures since the last successful transaction.
     data->consecutive_failures = 0;
 
     if (iqs5xx_reconfigure(data) < 0) {
@@ -319,15 +266,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
         return;
     }
 
-    // Read the whole contiguous data block in a single transaction. Every extra
-    // transaction is another chance to land outside of the communication window,
-    // so this both shortens report processing and keeps the error path below
-    // from being taken.
     ret = iqs5xx_read_buf(dev, IQS5XX_DATA_BLOCK_START, block, sizeof(block));
     if (ret < 0) {
-        // Deliberately no END_COMM_WINDOW write here: outside of a communication
-        // window that write asserts RDY again, which would re-enter this handler
-        // immediately and turn a single bus hiccup into an interrupt storm.
         iqs5xx_note_failure(data, "read the data block", ret);
         return;
     }
@@ -341,35 +281,26 @@ static void iqs5xx_work_handler(struct k_work *work) {
     int16_t rel_x = (int16_t)((block[5] << 8) | block[6]);
     int16_t rel_y = (int16_t)((block[7] << 8) | block[8]);
 
-    // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
         LOG_INF("Device reset detected");
 
-        // Acknowledge reset.
         ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_ACK_RESET);
         if (ret < 0) {
             iqs5xx_note_failure(data, "acknowledge the device reset", ret);
             return;
         }
 
-        // A reset discards the configuration (event mode, gestures, filters and
-        // axis setup), so the device has to be set up again. Acknowledging the
-        // reset and carrying on left the trackpad running with its power-on
-        // defaults, which is how the failure ended up appearing at seemingly
-        // random times well after a reset.
         if (iqs5xx_reconfigure(data) < 0) {
             LOG_ERR("Failed to re-initialize the device after a reset");
             iqs5xx_suspend_data_ready(data);
         }
 
-        // The reset discarded the communication window, so there is none to close.
         return;
     }
 
     bool tp_movement = (sys_info_1 & IQS5XX_TP_MOVEMENT) != 0;
     bool scroll = (gesture_events_1 & IQS5XX_SCROLL) != 0;
     if (!scroll) {
-        // Clear accumulators if we're not actively scrolling.
         data->scroll_x_acc = 0;
         data->scroll_y_acc = 0;
     }
@@ -387,10 +318,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     bool hold_became_active = (gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && !data->active_hold;
     bool hold_released = !(gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && data->active_hold;
 
-    // Handle movement and gestures.
-    //
-    // Each one of these branches needs to send the last report it makes as
-    // sync to ensure that the input subsystem processes things in order.
     if (hold_became_active) {
         LOG_INF("Hold became active");
         data->active_hold = true;
@@ -404,29 +331,22 @@ static void iqs5xx_work_handler(struct k_work *work) {
             LOG_WRN("Dropped hold release event");
         }
     } else if (button_pressed) {
-        // Cancel any pending release.
         k_work_cancel_delayable(&data->button_release_work);
 
         int btn_idx = button_code - INPUT_BTN_0;
-        
-        // Press the button immediately. Use K_NO_WAIT to prevent workqueue thread
-        // starvation if the input queue is full or consumer stalls.
+
         data->buttons_pressed |= (1 << btn_idx);
         if (input_report_key(dev, button_code, 1, true, K_NO_WAIT) < 0) {
             LOG_WRN("Dropped button press event");
         }
 
-        // Schedule release after 100ms. Track only this button to avoid race conditions.
         data->pending_release_btn = btn_idx;
         k_work_schedule(&data->button_release_work, K_MSEC(100));
     } else if (scroll) {
         // TODO: Expose this divisor.
         int16_t scroll_div = 32;
 
-        // Only one scrolling direction is valid at a time.
-        // End the communication right after reporting the movement.
         if (rel_x != 0) {
-            // By default the x axis is already "natural".
             if (!config->natural_scroll_x) {
                 rel_x *= -1;
             }
@@ -461,8 +381,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     }
 
 end_comm:
-    // Close the communication window. This is only reached after a successful
-    // read, i.e. when there really is a window to close.
     ret = iqs5xx_end_comm_window(dev);
     if (ret < 0) {
         iqs5xx_note_failure(data, "close the communication window", ret);
@@ -473,7 +391,6 @@ static void iqs5xx_rdy_handler(const struct device *port, struct gpio_callback *
                                gpio_port_pins_t pins) {
     struct iqs5xx_data *data = CONTAINER_OF(cb, struct iqs5xx_data, rdy_cb);
 
-    // Check initialized and armed flags. Single byte reads are atomic on ARM Cortex-M
     if (!data->initialized || !data->rdy_armed) {
         return;
     }
@@ -496,7 +413,6 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
     k_work_init_delayable(&data->recovery_work, iqs5xx_recovery_work_handler);
 
-    // Initialize fields to known states
     data->initialized = false;
     data->rdy_armed = false;
     data->buttons_pressed = 0;
@@ -506,7 +422,6 @@ static int iqs5xx_init(const struct device *dev) {
     data->consecutive_failures = 0;
     data->active_hold = false;
 
-    // Configure reset GPIO if available.
     if (config->reset_gpio.port) {
         if (!gpio_is_ready_dt(&config->reset_gpio)) {
             LOG_ERR("Reset GPIO not ready");
@@ -519,24 +434,17 @@ static int iqs5xx_init(const struct device *dev) {
             return ret;
         }
 
-        // Reset the device.
         gpio_pin_set_dt(&config->reset_gpio, 1);
         k_msleep(1);
         gpio_pin_set_dt(&config->reset_gpio, 0);
         k_msleep(10);
     }
 
-    // Configure RDY GPIO.
     if (!gpio_is_ready_dt(&config->rdy_gpio)) {
         LOG_ERR("RDY GPIO not ready");
         return -ENODEV;
     }
 
-    // Hold the data-ready line at its inactive level unless devicetree already
-    // asks for a pull. RDY is push-pull driven by the sensor, so the pull only
-    // matters when the trackpad is absent or its RDY line is otherwise left
-    // floating - precisely the case where an undefined level oscillates and
-    // hands the driver a never-ending stream of spurious edges.
     gpio_flags_t rdy_flags = GPIO_INPUT;
     if (!(config->rdy_gpio.dt_flags & (GPIO_PULL_UP | GPIO_PULL_DOWN))) {
         rdy_flags |= GPIO_PULL_DOWN;
@@ -555,9 +463,6 @@ static int iqs5xx_init(const struct device *dev) {
         return ret;
     }
 
-    // Setup device configuration. The data-ready interrupt is only armed once
-    // the sensor has been configured, so that the setup traffic cannot be
-    // mistaken for a report.
     if (iqs5xx_reconfigure(data) < 0) {
         // The trackpad may simply not be connected. Keep the keyboard usable and
         // re-check at a harmless rate instead of failing the device - or, far
@@ -574,7 +479,6 @@ static int iqs5xx_init(const struct device *dev) {
     return 0;
 }
 
-// Replace CONFIG_INPUT_INIT_PRIORITY with the azoteq specific value.
 #define IQS5XX_INIT(n)                                                                             \
     static struct iqs5xx_data iqs5xx_data_##n;                                                     \
     static const struct iqs5xx_config iqs5xx_config_##n = {                                        \
