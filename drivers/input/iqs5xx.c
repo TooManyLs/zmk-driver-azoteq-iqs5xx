@@ -335,13 +335,15 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
         int btn_idx = button_code - INPUT_BTN_0;
 
-        data->buttons_pressed |= (1 << btn_idx);
-        if (input_report_key(dev, button_code, 1, true, K_NO_WAIT) < 0) {
-            LOG_WRN("Dropped button press event");
-        }
+        if (!(data->buttons_pressed & (1 << btn_idx))) {
+            data->buttons_pressed |= (1 << btn_idx);
+            if (input_report_key(dev, button_code, 1, true, K_NO_WAIT) < 0) {
+                LOG_WRN("Dropped button press event");
+            }
 
-        data->pending_release_btn = btn_idx;
-        k_work_schedule(&data->button_release_work, K_MSEC(100));
+            data->pending_release_btn = btn_idx;
+            k_work_schedule(&data->button_release_work, K_MSEC(50));
+        }
     } else if (scroll) {
         // TODO: Expose this divisor.
         int16_t scroll_div = 32;
